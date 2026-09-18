@@ -91,8 +91,47 @@ From a source checkout the server reads `TYPESAFE_API_KEY` from the repo's `.env
 | `browser_choose(question, options)` | pick among given options → distribution |
 | `browser_snapshot()` | compact numbered element list, for taking over |
 | `browser_act(action, element, value?, key?, destination?, accept_dialog?)` | act on an element directly, no model; confirm/prompt dialogs are dismissed unless `accept_dialog` |
+| `browser_read(question, max_chars?)` | the page text that helps answer a question; Jev drops the rest |
 | `browser_screenshot(full_page?)` | PNG image |
 | `browser_close()` | end the session |
+
+### Reading a page: `browser_read`
+
+`browser_snapshot` is the take-over-and-act surface: numbered elements, plus the text **in the
+viewport**. That is the right trade for acting, and it is already small (99–6,900 tokens on
+every page measured, because elements are capped at 400 and the text at 2,500 chars). It is a
+poor way to *read*, though — a Wikipedia article is ~179k chars of text, so a snapshot shows
+about 1.4% of it and the rest costs a scroll-and-snapshot loop.
+
+`browser_read(question)` is the understand-the-content surface. Code extracts the whole
+document's text and cuts it at headings and sections; Jev rates every block against the
+question in batches of 40; code returns the blocks that help, in document order, inside a
+character budget. Jev ranks, it never writes — the text you get back is the page's own.
+
+| | `browser_snapshot` | `browser_read` |
+|---|---|---|
+| gives you | numbered elements + viewport text | document text relevant to a question |
+| use it to | act (with `browser_act`) | read, quote, answer |
+| model calls | none | 1 per ~50k chars, ~1 s each |
+| lossless | yes | no — drops blocks, and says which |
+
+**When it pays.** Long articles, documentation and reference pages. On the WW2 article,
+"When and why did Japan surrender?" returned 11.8k of 178.5k chars — 15× less — in 3.4 s over
+5 Jev calls, keeping the atomic-bomb and surrender paragraphs.
+
+**When it doesn't.** Short pages, apps and forms. Below a 8,000-char floor (and below your own
+`max_chars`) it returns the page whole and never calls Jev at all, because paying ~1 s to prune
+a 2k-token page is a loss. Hacker News, a BBC front page and saucedemo all land under the floor.
+
+It is **biased to keep**: a block Jev cannot rate — or a whole batch whose request failed — is
+kept, and whatever is left out is counted and marked in place with `[… N blocks dropped …]`.
+Nothing is ever silently cut. Use `browser_snapshot` if you need the page as the caller
+normally sees it.
+
+```bash
+node examples/read-demo.mjs                                   # WW2 article, default question
+node examples/read-demo.mjs "https://…" "what do you want?"   # needs a key
+```
 
 `browser_do` statuses:
 
@@ -165,6 +204,7 @@ Private sites and credentials go in `bench/tasks.local.mjs` (git-ignored), expor
 src/session.mjs      JevBrowser: settle, snapshot, decide (1 or 2 stages), resolve, act, do, check, choose
 src/page-script.mjs  runs in each frame: elements, labels, state, visible text, metrics, dialogs
 src/page-model.mjs   pure helpers: diff between pages, counts, compact rendering
+src/prune.mjs        pure helpers: split page text into blocks, batch, rank, reassemble
 src/jev.mjs          System One API client
 src/flow.mjs         JSON flow runner
 bin/                 CLI and MCP server

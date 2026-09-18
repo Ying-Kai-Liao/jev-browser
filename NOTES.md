@@ -116,6 +116,7 @@ do(goal, values?)                  -> { status: done|likely_done|needs_confirmat
                                         url, actions[], page_text?, candidates? }
 check(question)                    -> probability          # verify side effects, read state
 choose(question, options)          -> { choice, probabilities }
+read(question, {budgetChars})      -> { content, kept_blocks, dropped_blocks, … }   # read a long page
 ```
 
 Guidance for the planner writing goals:
@@ -184,6 +185,70 @@ Current result: 38/41 in two identical runs, 0 false "done" claims (RESULTS.md).
     With that, Jev closed the modal with Escape by itself and finished the step.
 25. **Headless can be blocked silently.** x.com renders nothing in headless Chromium, and settling
     reports the empty page as quiet after 0.7 s. Use headed mode for such sites; `open()` doesn't detect this yet.
+
+## Round 4: reading a page, not acting on it (2026-09-19)
+
+The question was whether Jev could do content *structuring* or content *pruning*. Jev never
+generates text, so structuring is out: it can rank, filter and classify into a fixed
+code-supplied taxonomy, and nothing else. Pruning is in. The measurement came first, because
+the honest answer might have been "not worth it".
+
+**What `browser_snapshot` actually costs today** (1280×800, chars → tokens at /4):
+
+| page | elements | snapshot chars | snapshot tokens | `page.text` | whole document |
+|---|---|---|---|---|---|
+| Wikipedia, *World War II* | 4,545 | 27,653 | 6,913 | 2,432 | 179,208 chars (44.8k tok) |
+| MDN, *Using the Fetch API* | 212 | 14,978 | 3,745 | 1,365 | 15,256 chars (3.8k tok) |
+| Wikipedia search results | 66 | 6,617 | 1,654 | 1,487 | 5,626 chars (1.4k tok) |
+| Hacker News front page | 227 | 17,007 | 4,252 | 2,417 | 3,957 chars (1.0k tok) |
+| BBC News front page | 117 | 9,666 | 2,417 | 738 | 7,996 chars (2.0k tok) |
+| saucedemo (control) | 3 | 396 | 99 | 160 | 161 chars (40 tok) |
+
+26. **The snapshot is already small, so there is nothing there worth pruning.** 99–6,913 tokens
+    across every page measured, and that is structural: `formatPage` caps elements at 400 and
+    `page.text` at 2,500 chars. Asking Jev to shrink that would cost 700 ms–1.5 s to save a few
+    thousand tokens. **Do not prune the snapshot.**
+27. **The gap is the other 98% of the document.** On the WW2 article the snapshot shows 2,432 of
+    179,208 chars — 1.4%. A caller who wants to *read* the page has no way to get the rest except
+    scroll-and-snapshot, which is ~74 rounds at 6.9k tokens. So `browser_read` ranks the full
+    document text, which `browser_snapshot` never had, rather than re-cutting what it already has.
+28. **The threshold: rank only above 8,000 chars of extracted text, and only above the caller's
+    own budget.** Under either, the whole page is already about the size a pruned one would be,
+    and the round trip is pure loss. Hacker News (3.8k), the BBC front page (7.9k) and saucedemo
+    (0.2k) all fall below it and come back whole with no Jev call; the WW2 article (178.5k) and
+    the MDN page (15.1k) are ranked.
+29. **One noul per block, 40 blocks per request.** 191 blocks of the WW2 article took 5 requests
+    and 3.3 s (36–46k state chars, 11–21k input tokens each). One request per block would have
+    been 191 round trips. Same lesson as rule 2: fan-out is cheap, separate calls are not.
+30. **The scores separate cleanly, and they sit low.** For "When and why did Japan surrender?":
+    p50 = 0.07, p90 = 0.25, max = 0.99, with the surrender paragraphs at 0.93–0.99 and the nav
+    chrome and footer at 0.02. Two other question/page pairs behaved the same (MDN POST body:
+    p50 0.14, top 0.88; WW2 casualties: p50 0.05, top 0.97). These are not calibrated around
+    0.5, so a 0.5 cut would be a *strict* filter, not a neutral one.
+31. **Keep at ≥ 0.35 — bias to keep.** A wrongly dropped block is invisible to the caller, the
+    same class of failure as a false `done`, and this project has held 0 false-done across its
+    bench. 0.35 sits well below the relevant band and above the p90 tail: 12 blocks / 11.8k chars
+    kept out of 178.5k, 15×. Anything unscored — a block the gate skipped, or a whole batch whose
+    request failed — is kept, never dropped.
+32. **Split quality was most of the work, and three bugs were only visible on real pages.**
+    (a) Wikipedia wraps every `<h2>` in its own small `<div>`, so a container that fits in one
+    block still has to be descended into when it holds a heading, or the section path never
+    advances past the title. (b) `innerText` falls back to `textContent` on an element that is
+    not rendered, so a `display:none` subtree comes back as readable text even though
+    `body.innerText` excludes it; an unrendered element has no client rects, which is the test
+    that works (`checkVisibility()` is not — it calls MDN's `<main>` invisible although that
+    element holds the whole article, which silently cost 14k of MDN's 15k chars). (c) SVG and
+    MathML keep their tagName's case and have no `innerText` at all.
+33. **Report the loss in two kinds.** "not relevant" (Jev ranked it out) and "over budget" (it
+    lost to a better-scoring block) are different problems for the caller: the second is fixed by
+    raising `max_chars`. Gaps are marked in place with `[… N blocks / M chars dropped …]` so a
+    missing passage is never a silent truncation.
+34. **A new tool, not a flag on `browser_snapshot`.** `browser_snapshot` is the take-over-and-act
+    surface and has to stay lossless — dropping an actionable element there would break the
+    caller. Keeping the two apart removes that failure mode by construction.
+
+Not done: structuring. Jev cannot emit a heading, a summary or a schema, and a fixed taxonomy
+over blocks was not worth its complexity until something asks for it.
 
 ## Next
 

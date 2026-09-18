@@ -24,7 +24,7 @@ async function call(name, args = {}) {
 
 try {
 const tools = (await client.listTools()).tools.map(t => t.name);
-assert.deepEqual(tools.sort(), ["browser_act", "browser_check", "browser_choose", "browser_close", "browser_do", "browser_open", "browser_screenshot", "browser_snapshot"]);
+assert.deepEqual(tools.sort(), ["browser_act", "browser_check", "browser_choose", "browser_close", "browser_do", "browser_open", "browser_read", "browser_screenshot", "browser_snapshot"]);
 
 await call("browser_open", { url: "https://demo.playwright.dev/todomvc/" });
 let r = await call("browser_do", { goal: "Add a todo item", values: { todo: "buy milk" } });
@@ -39,6 +39,10 @@ const snap = await call("browser_snapshot");
 const line = snap.split("\n").find(l => /input:checkbox label="Toggle Todo"/.test(l) && /buy milk/.test(l));
 assert.ok(line, "snapshot lists the buy milk toggle");
 const i = +line.match(/^\[(\d+)\]/)[1];
+// TodoMVC is far below the ranking threshold, so this is the gate path: content in full, no Jev call
+const read = await call("browser_read", { question: "What todo items are on the list?" });
+assert.match(read, /buy milk/); assert.match(read, /walk the dog/);
+assert.match(read, /threshold for ranking: no Jev call/);
 await call("browser_act", { action: "click", element: i });
 const p2 = await call("browser_check", { question: "Is 'buy milk' marked as completed while 'walk the dog' is not?" });
 assert.ok(p2.p_yes > 0.6, `check p=${p2.p_yes}`);

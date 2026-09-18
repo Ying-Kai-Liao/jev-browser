@@ -9,6 +9,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { JevBrowser } from "../src/session.mjs";
+import { formatRead } from "../src/prune.mjs";
 
 // Holds the launch promise, not the session, so parallel tool calls share one browser.
 let session;
@@ -122,6 +123,25 @@ server.registerTool("browser_close", {
 }, wrap(async () => {
   await closeSession();
   return text({ closed: true });
+}));
+
+server.registerTool("browser_read", {
+  title: "Read page content",
+  description: [
+    "Return the part of the current page's text that helps answer a question. Use it to READ a page; use browser_snapshot to ACT on one.",
+    "browser_snapshot only shows the text in the viewport (a long article is ~1% of its content), so this is the way to reach the rest of a document without scrolling and snapshotting it piece by piece.",
+    "Code splits the full document into blocks at headings and sections, Jev rates each block against your question, and code returns the ones that help, in document order.",
+    "Short pages come back whole with no model call. Long ones are pruned: whatever is left out is counted and marked in place with [… N blocks dropped …], never silently cut. Widen `question` or raise `max_chars` to get more back, or use browser_snapshot for the page as it normally appears.",
+    "Costs ~1 s per 50k characters of page text.",
+  ].join("\n"),
+  inputSchema: {
+    question: z.string().describe("What you want to learn from the page; blocks are kept or dropped against this"),
+    max_chars: z.number().int().min(500).max(200_000).optional().describe("Character budget for the content returned. Default 12000"),
+  },
+}, wrap(async ({ question, max_chars }) => {
+  const b = await browser();
+  const r = await b.read(question, max_chars ? { budgetChars: max_chars } : {});
+  return text(formatRead(r));
 }));
 
 const shutdown = async () => { await closeSession(); process.exit(0); };

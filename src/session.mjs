@@ -11,8 +11,9 @@
 // an option to select, or a stricter "is it done" when the answers disagree.
 import { chromium } from "playwright";
 import { jev } from "./jev.mjs";
-import { ENUMERATE } from "./page-script.mjs";
+import { ENUMERATE, EXTRACT_BLOCKS } from "./page-script.mjs";
 import { FIELDISH, SELECTISH, FILEISH, brief, pageDiff, repeatedElements, formatPage } from "./page-model.mjs";
+import { normalizeBlocks, batchBlocks, batchQuestions, pickBlocks, readResult, totalChars, MIN_PRUNE_CHARS, BUDGET_CHARS, DROP_BELOW } from "./prune.mjs";
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -179,6 +180,63 @@ export class JevBrowser {
     const criteria = Array.isArray(options) ? Object.fromEntries(options.map(o => [o, null])) : options;
     const { answers } = await this.call({ page }, { q: { type: "choice", instructions: `Answer about \`page\`: ${question}`, criteria } });
     return { choice: answers.q.choice, probabilities: answers.q.probabilities, confidence: answers.q.confidence };
+  }
+
+  // The whole document's readable text, cut at structural boundaries, main frame first.
+  // `snapshot().text` is viewport-only on purpose; this is what a reader would scroll through.
+  async extractBlocks({ maxBlock, maxChars } = {}) {
+    const main = this.page.mainFrame();
+    const frames = [main, ...main.childFrames().filter(f => !f.isDetached())];
+    const blocks = []; let base, truncated = false;
+    for (const [n, f] of frames.entries()) {
+      let r;
+      try { r = await f.evaluate(EXTRACT_BLOCKS, { maxBlock, maxChars, frame: n || undefined }); } catch { continue; }
+      if (n === 0) base = r;
+      blocks.push(...r.blocks);
+      truncated ||= r.truncated;
+    }
+    return { url: base?.url ?? this.page.url(), title: base?.title ?? "", blocks, truncated };
+  }
+
+  // Page content relevant to `question`: code splits, Jev ranks, code reassembles. The same
+  // shape as the two-stage element selection in decide() — Jev is the ranking function, code
+  // owns the recursion and the budget. Never returns a silent truncation: whatever is left out
+  // is counted, marked in place and reported.
+  async read(question, { budgetChars = BUDGET_CHARS, minChars = MIN_PRUNE_CHARS, dropBelow = DROP_BELOW, maxBlock, maxChars } = {}) {
+    await this.settle();
+    const { url, title, blocks: raw, truncated } = await this.extractBlocks({ maxBlock, maxChars });
+    const blocks = normalizeBlocks(raw, maxBlock ? { maxBlock } : {});
+    const size = totalChars(blocks);
+    const base = { url, title, question, blocks, truncated };
+
+    // Ranking pays off only above both the floor and the caller's own budget: under either the
+    // page is already about the size a pruned one would be, and a Jev call costs 700 ms-1.5 s.
+    // Skipping the ranking does not skip the budget.
+    const gate = Math.max(minChars, budgetChars);
+    if (size <= gate) {
+      const { kept, dropped } = pickBlocks(blocks, {}, { dropBelow, budgetChars });
+      return readResult({ ...base, kept, dropped, pruned: false, reason: `page text is ${size} chars, at or below the ${gate}-char threshold for ranking: no Jev call` });
+    }
+
+    const scores = {};
+    let calls = 0, ms = 0;
+    for (const batch of batchBlocks(blocks)) {
+      const state = { question, page: { url, title, blocks: batch.map(b => ({ i: b.i, ...(b.section ? { section: b.section } : {}), text: b.text })) } };
+      try {
+        const r = await this.call(state, batchQuestions(batch));
+        calls++; ms += r.ms;
+        for (const b of batch) { const a = r.answers[`b${b.i}`]; if (a?.noul !== undefined) scores[b.i] = a.noul; }
+      } catch (e) {
+        // bias to keep: an unanswered batch leaves its blocks unscored, and unscored blocks stay
+        this.events.push(`browser_read: a ranking request failed (${String(e?.message ?? e).slice(0, 80)}); its blocks were kept unranked`);
+      }
+    }
+    const { kept, dropped } = pickBlocks(blocks, scores, { dropBelow, budgetChars });
+    const unranked = blocks.length - Object.keys(scores).length;
+    return readResult({
+      ...base, kept, dropped, pruned: true, jevCalls: calls, jevMs: ms,
+      reason: unranked ? `${unranked} of ${blocks.length} blocks could not be ranked and were kept` : undefined,
+    });
   }
 
   async decide(page, goal, values, history, lastChange) {

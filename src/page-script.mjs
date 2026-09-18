@@ -163,3 +163,75 @@ export const ENUMERATE = ({ start, frame }) => {
   };
 };
 
+
+// Runs inside each frame. The whole document's readable text, cut at structural boundaries
+// (headings, sections, list items, table rows, paragraphs) so each piece can be judged on its
+// own. ENUMERATE's `text` is viewport-only by design; this is everything a reader would scroll
+// through, which is what `browser_read` has to rank. Oversized leaves and runs of tiny blocks
+// are left for normalizeBlocks() in src/prune.mjs, so the splitting rules stay offline-testable.
+// Must stay self-contained: Playwright serialises it into the page.
+export const EXTRACT_BLOCKS = ({ maxBlock = 1200, maxChars = 400_000, frame } = {}) => {
+  const SKIP = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE", "SVG", "CANVAS", "IFRAME", "OBJECT", "AUDIO", "VIDEO"]);
+  const clean = s => (s || "").replace(/[ \t ]+/g, " ").replace(/ *\n */g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  const blocks = [];
+  const path = [];                       // current heading path, indexed by heading level - 1
+  let chars = 0, truncated = false;
+
+  const emit = (text, tag) => {
+    if (!text) return;
+    if (chars >= maxChars) { truncated = true; return; }
+    const section = path.filter(Boolean).join(" > ");
+    blocks.push({ text, tag, ...(section ? { section } : {}), ...(frame ? { frame } : {}) });
+    chars += text.length;
+  };
+
+  const walk = el => {
+    if (chars >= maxChars) { truncated = true; return; }
+    // SVG and MathML keep their tagName's original case and have no innerText at all
+    const tag = el.tagName.toUpperCase();
+    if (SKIP.has(tag) || typeof el.innerText !== "string" || el.closest('[aria-hidden="true"], [inert]')) return;
+    // innerText falls back to textContent on an element that is not rendered, so a display:none
+    // subtree would come back as readable text even though body.innerText (and therefore
+    // metrics.text_length) leaves it out. An unrendered element has no client rects; the
+    // display:contents exception is rendered through its children and must still be walked.
+    // checkVisibility() is not usable for this: it calls MDN's <main> invisible although that
+    // element holds the whole article.
+    if (!el.getClientRects().length && getComputedStyle(el).display !== "contents") return;
+
+    const h = /^H([1-6])$/.exec(tag);
+    if (h) {
+      const t = clean(el.innerText).slice(0, 200);
+      const lvl = +h[1];
+      path.length = lvl - 1;
+      path[lvl - 1] = t;
+      emit(t, "heading");
+      return;
+    }
+    // textContent is a free size proxy; innerText (which costs layout) is only taken once we
+    // have decided this element is a block rather than a container to descend into. A small
+    // container still has to be descended into when it wraps a heading (Wikipedia puts every
+    // <h2> in its own div), otherwise the heading path never advances past the title.
+    if (el.textContent.length <= maxBlock && !el.querySelector("h1, h2, h3, h4, h5, h6")) { emit(clean(el.innerText), tag.toLowerCase()); return; }
+
+    const kids = [...el.children].filter(c => !SKIP.has(c.tagName.toUpperCase()));
+    if (!kids.length) { emit(clean(el.innerText), tag.toLowerCase()); return; }
+    // Loose text nodes between element children are content too, and would be lost otherwise.
+    let loose = "";
+    for (const n of el.childNodes) {
+      if (n.nodeType === 3) { loose += n.textContent; continue; }
+      if (n.nodeType !== 1) continue;
+      const t = clean(loose); loose = "";
+      if (t) emit(t, "text");
+      walk(n);
+    }
+    const t = clean(loose);
+    if (t) emit(t, "text");
+  };
+
+  if (document.body) walk(document.body);
+  return {
+    url: location.href, title: document.title,
+    blocks, truncated,
+    total_chars: document.body?.innerText?.length ?? 0,
+  };
+};
