@@ -89,9 +89,20 @@ server.registerTool("browser_choose", {
 
 server.registerTool("browser_snapshot", {
   title: "Page snapshot",
-  description: "Compact view of the current page: visible text and numbered interactive elements. Use it to take over when browser_do is ambiguous or stuck, then act with browser_act.",
-  inputSchema: {},
-}, wrap(async () => text(await (await browser()).snapshotText())));
+  description: [
+    "Compact view of the current page: visible text and numbered interactive elements. Use it to take over when browser_do is ambiguous or stuck, then act with browser_act.",
+    "This is the one observation you read in full, so narrow it: `diff` after an action, `filter` when you know what you are looking for, `interactive` when the page's prose does not matter.",
+    "Link targets are omitted unless `urls` is true; element numbers, not URLs, are what browser_act takes.",
+  ].join("\n"),
+  inputSchema: {
+    diff: z.boolean().optional().describe("Only what changed since the previous snapshot (falls back to a full one if there is none). Carries no element numbers: take a full snapshot to act."),
+    interactive: z.boolean().optional().describe("Drop the visible-text block and list only elements (dialog/status text is kept)"),
+    filter: z.string().optional().describe("Keep only elements whose label/text/placeholder/name/href contains this substring, case-insensitive"),
+    urls: z.boolean().optional().describe("Print href= on element lines. Default false"),
+    max_chars: z.number().int().min(200).optional().describe("Size limit of the rendered snapshot. Default 10000, capped at 20000"),
+  },
+}, wrap(async ({ diff, interactive, filter, urls, max_chars }) =>
+  text(await (await browser()).snapshotText({ diff: !!diff, interactive: !!interactive, filter: filter ?? "", urls: !!urls, maxChars: max_chars }))));
 
 server.registerTool("browser_act", {
   title: "Act on element",

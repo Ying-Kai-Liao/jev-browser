@@ -89,7 +89,7 @@ From a source checkout the server reads `TYPESAFE_API_KEY` from the repo's `.env
 | `browser_do(goal, values?, max_actions?, allow_irreversible?, explain?)` | work toward one outcome; returns a status |
 | `browser_check(question)` | yes/no about the page → `p_yes` |
 | `browser_choose(question, options)` | pick among given options → distribution |
-| `browser_snapshot()` | compact numbered element list, for taking over |
+| `browser_snapshot(diff?, interactive?, filter?, urls?, max_chars?)` | compact numbered element list, for taking over; the options below narrow it |
 | `browser_act(action, element, value?, key?, destination?, accept_dialog?)` | act on an element directly, no model; confirm/prompt dialogs are dismissed unless `accept_dialog` |
 | `browser_screenshot(full_page?)` | PNG image |
 | `browser_close()` | end the session |
@@ -106,6 +106,23 @@ From a source checkout the server reads `TYPESAFE_API_KEY` from the repo's `.env
 | `stuck` / `max_actions` | no progress; see `info`, `page_text`, `candidates` |
 | `ambiguous` | low confidence in the target; pick from `candidates` with `browser_act` |
 | `blocked` | captcha, access denied, error page |
+
+`browser_snapshot` options. A snapshot is the one page the calling LLM reads in full, so every
+option narrows what gets rendered. All of them are pure formatting: nothing is collected
+differently and none of them costs a Jev call.
+
+| option | default | effect |
+|---|---|---|
+| `diff` | `false` | only what changed since the previous snapshot, using the same diff the `browser_do` loop feeds Jev. With no previous snapshot you get a full one and a note saying so. A diff carries no element numbers: take a full snapshot to act. |
+| `interactive` | `false` | drop the `visible text:` block; element lines and dialog/status text stay. The element list is interactive-only already, so this narrows the prose, not the elements. |
+| `filter` | — | keep only elements whose label, text, placeholder, name or href contains the substring, case-insensitive; the header says how many were hidden |
+| `urls` | `false` | print `href=` on element lines. **Off by default** — on a link-heavy page link targets are the largest single share of the output, and `browser_act` takes element numbers, not URLs. A link with nothing else to identify it keeps its href. |
+| `max_chars` | `10000` | size of the rendered snapshot, hard cap 20000. When it truncates, the last line says how many element lines and characters were dropped and which option would narrow it. |
+
+A typed password is never printed: `input:password` values render as `[redacted]`, in a snapshot
+and in a diff. Measured on a Wikipedia article (1,840 elements), a default snapshot went from
+26,919 to 9,926 characters (~6,700 → ~2,500 estimated tokens); `filter` brings it to ~800 and
+`diff` after a scroll to ~50.
 
 Env: `JEV_BROWSER_HEADED=1` shows the browser, `JEV_BROWSER_PROFILE=/dir` keeps a persistent
 profile (logins survive restarts), `JEV_BROWSER_LOG=1` prints per-round decisions to stderr.

@@ -70,23 +70,97 @@ export function repeatedElements(elements) {
   return rep.length ? Object.fromEntries(rep) : undefined;
 }
 
+// A snapshot is the one observation the calling LLM pays for in full, so rendering it is where
+// the cheap, deterministic narrowing lives: everything below only changes what is printed, never
+// what was collected, and costs no Jev call.
+export const REDACTED = "[redacted]";
+export const MAX_CHARS_DEFAULT = 10000;
+export const MAX_CHARS_CAP = 20000;
+const NARROW_HINT = "narrow with filter, interactive or diff";
+
+const secret = e => e.tag === "input:password" && e.value !== undefined && e.value !== "";
+
+// A snapshot must never echo a typed password back to the caller. Redacting here rather than in
+// the collector keeps the page model (and what Jev is shown, which never leaves the process)
+// intact, so element matching in currentElement() still sees the real value.
+export function redactPage(page) {
+  if (!page?.elements?.some(secret)) return page;
+  return { ...page, elements: page.elements.map(e => secret(e) ? { ...e, value: REDACTED } : e) };
+}
+
+const FILTERABLE = ["label", "text", "placeholder", "name", "href"];
+
+function elementLine(e, urls) {
+  const f = [];
+  for (const k of ["label", "text", "placeholder", "name"]) if (e[k]) f.push(`${k === "text" ? "" : k + "="}"${e[k]}"`);
+  if (e.value !== undefined && e.value !== "") f.push(`value="${e.value}"`);
+  if (e.options) f.push(`options=[${e.options.slice(0, 8).join(", ")}${e.options.length > 8 ? ", …" : ""}]`);
+  for (const k of ["checked", "disabled", "busy", "expanded", "active", "hidden", "covered"]) if (e[k] !== undefined) f.push(`${k}=${e[k]}`);
+  if (e.sorted) f.push(`sorted=${e.sorted}`);
+  // href is the largest share of the output on a link-heavy page and the caller acts on element
+  // numbers, not URLs, so it is off unless asked for — except when it is the only thing that
+  // identifies the element (icon-only links would otherwise render as a bare `[7] a`).
+  if (e.href && (urls || !(e.label || e.text || e.placeholder || e.name || e.near))) f.push(`href=${e.href}`);
+  if (e.near && !e.text) f.push(`near="${e.near}"`);
+  if (e.frame) f.push(`frame=${e.frame}`);
+  return `[${e.i}] ${e.tag} ${f.join(" ")}`;
+}
+
+const capOf = maxChars => maxChars === Infinity ? Infinity : Math.max(0, Math.min(maxChars ?? MAX_CHARS_DEFAULT, MAX_CHARS_CAP));
+
 // Compact, line-per-element rendering for an LLM that takes over from Jev.
-export function formatPage(page, { maxElements = 400 } = {}) {
+// interactive: drop the page's prose (dialogs stay — they carry the status/error text).
+// filter: keep only elements whose label/text/placeholder/name/href contains the substring.
+// urls: print href= on every element line (default off).
+// maxChars: size of the rendered snapshot, capped at MAX_CHARS_CAP; Infinity for no limit.
+export function formatPage(page, { maxElements = 400, interactive = false, filter = "", urls = false, maxChars = MAX_CHARS_DEFAULT } = {}) {
+  page = redactPage(page);
+  const head = [`url: ${page.url}`, `title: ${page.title}`];
+  if (page.dialogs?.length) head.push(`dialogs: ${page.dialogs.join(" || ")}`);
+  if (!interactive) head.push(`visible text: ${page.text}`);
+
+  // page.elements is interactive-only by construction (see SEL in page-script.mjs), so `filter`
+  // narrows within it rather than re-filtering what is already filtered.
+  const needle = String(filter ?? "").toLowerCase();
+  const kept = needle ? page.elements.filter(e => FILTERABLE.some(k => String(e[k] ?? "").toLowerCase().includes(needle))) : page.elements;
+  const hiddenByFilter = page.elements.length - kept.length;
+  head.push(`elements (${kept.length}${hiddenByFilter ? ` of ${page.elements.length}; ${hiddenByFilter} hidden by filter "${filter}"` : ""}):`);
+
+  const rendered = kept.map(e => elementLine(e, urls));
+  const fullLen = [...head, ...rendered].join("\n").length;
+  const cap = capOf(maxChars);
+  const allowed = rendered.slice(0, maxElements);
+  let n = allowed.length;
+  if (fullLen > cap || n < kept.length) {
+    // leave room for the trailer so the result still fits under the cap
+    const budget = Math.max(0, cap - 220);
+    let used = head.join("\n").length;
+    n = 0;
+    while (n < allowed.length && used + 1 + allowed[n].length <= budget) { used += 1 + allowed[n].length; n++; }
+  }
+  const lines = [...head, ...rendered.slice(0, n)];
+  if (n < kept.length) lines.push(`… truncated: ${kept.length - n} of ${kept.length} element lines and ${fullLen - lines.join("\n").length} chars dropped; ${NARROW_HINT}, or raise max_chars (now ${cap}, cap ${MAX_CHARS_CAP}).`);
+  return lines.join("\n");
+}
+
+// Renders what pageDiff() found, for a caller that asked for a diff instead of a whole page.
+// Element numbers are deliberately absent: they come from the elements a snapshot lists, and a
+// diff lists none, so acting needs a full snapshot.
+export function formatDiff(page, d, { maxChars = MAX_CHARS_DEFAULT } = {}) {
   const lines = [`url: ${page.url}`, `title: ${page.title}`];
   if (page.dialogs?.length) lines.push(`dialogs: ${page.dialogs.join(" || ")}`);
-  lines.push(`visible text: ${page.text}`, `elements (${page.elements.length}):`);
-  for (const e of page.elements.slice(0, maxElements)) {
-    const f = [];
-    for (const k of ["label", "text", "placeholder", "name"]) if (e[k]) f.push(`${k === "text" ? "" : k + "="}"${e[k]}"`);
-    if (e.value !== undefined && e.value !== "") f.push(`value="${e.value}"`);
-    if (e.options) f.push(`options=[${e.options.slice(0, 8).join(", ")}${e.options.length > 8 ? ", …" : ""}]`);
-    for (const k of ["checked", "disabled", "busy", "expanded", "active", "hidden", "covered"]) if (e[k] !== undefined) f.push(`${k}=${e[k]}`);
-    if (e.sorted) f.push(`sorted=${e.sorted}`);
-    if (e.href) f.push(`href=${e.href}`);
-    if (e.near && !e.text) f.push(`near="${e.near}"`);
-    if (e.frame) f.push(`frame=${e.frame}`);
-    lines.push(`[${e.i}] ${e.tag} ${f.join(" ")}`);
-  }
-  if (page.elements.length > maxElements) lines.push(`… ${page.elements.length - maxElements} more`);
-  return lines.join("\n");
+  const body = [];
+  for (const k of ["added", "removed", "changed"]) if (d[k]?.length) body.push(`${k} (${d[k].length}):`, ...d[k].map(x => `  ${x}`));
+  if (d.reordered) body.push("reordered:", `  before: ${d.reordered.before.join(" | ")}`, `  after: ${d.reordered.after.join(" | ")}`);
+  if (d.url) body.push(`url changed: ${d.url}`);
+  if (d.metrics) body.push("metrics:", ...Object.entries(d.metrics).map(([k, v]) => `  ${k}: ${v}`));
+  if (d.new_text) body.push(`new text: ${d.new_text}`);
+  lines.push(body.length ? "changes since the previous snapshot:" : "no changes since the previous snapshot.", ...body);
+  lines.push("(a diff carries no element numbers; take a snapshot with diff:false to act with browser_act)");
+
+  const cap = capOf(maxChars);
+  const text = lines.join("\n");
+  if (text.length <= cap) return text;
+  const cut = text.slice(0, Math.max(0, cap - 120));
+  return `${cut}\n… truncated: ${text.length - cut.length} chars dropped; raise max_chars (now ${cap}, cap ${MAX_CHARS_CAP}).`;
 }

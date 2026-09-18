@@ -12,7 +12,7 @@
 import { chromium } from "playwright";
 import { jev } from "./jev.mjs";
 import { ENUMERATE } from "./page-script.mjs";
-import { FIELDISH, SELECTISH, FILEISH, brief, pageDiff, repeatedElements, formatPage } from "./page-model.mjs";
+import { FIELDISH, SELECTISH, FILEISH, brief, pageDiff, repeatedElements, formatPage, formatDiff, redactPage } from "./page-model.mjs";
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -156,7 +156,20 @@ export class JevBrowser {
     return s;
   }
 
-  async snapshotText() { await this.settle(); this.shown = await this.snapshot(); return formatPage(this.shown); }
+  // The snapshot the caller reads itself — the one observation it pays for in full. Every option
+  // narrows the rendering only; none of them collects less or calls Jev. `diff` reuses pageDiff()
+  // against the page this caller was last shown, so it reports the same changes the do() loop sees.
+  async snapshotText({ diff = false, ...render } = {}) {
+    await this.settle();
+    const prev = this.shown;
+    const page = await this.snapshot();
+    this.shown = page;
+    if (!diff) return formatPage(page, render);
+    // redact before diffing: state() in pageDiff prints value=, which would leak a typed password
+    const d = pageDiff(redactPage(prev), redactPage(page));
+    if (!d) return `(no previous snapshot to diff against; showing the full page)\n${formatPage(page, render)}`;
+    return formatDiff(page, d, render);
+  }
 
   async call(state, questions) {
     const r = await jev(state, questions);

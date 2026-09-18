@@ -144,6 +144,95 @@ test("formatPage renders one line per element", () => {
   assert.match(txt, /\[\d+\] input:email label="Email address"/);
 });
 
+// Hand-built page models: the snapshot options are pure rendering, so they need no browser.
+const model = (elements, rest = {}) => ({ url: "u", title: "t", text: "", elements, ...rest });
+
+test("formatPage redacts a typed password and leaves the page model alone", () => {
+  const pg = model([{ i: 0, tag: "input:password", label: "Password", value: "hunter2" }], { text: "sign in" });
+  const txt = formatPage(pg);
+  assert.doesNotMatch(txt, /hunter2/);
+  assert.match(txt, /\[0\] input:password label="Password" value="\[redacted\]"/);
+  assert.equal(pg.elements[0].value, "hunter2", "redaction happens in the renderer, not in the model");
+  // an empty password field has nothing to hide and still renders as before
+  assert.match(formatPage(model([{ i: 0, tag: "input:password", label: "Password" }])), /\[0\] input:password label="Password"$/m);
+});
+
+test("urls: href is off by default, printed when asked, kept when it is the only identity", () => {
+  const pg = model([{ i: 0, tag: "a", text: "Docs", href: "/docs" }, { i: 1, tag: "a", href: "/icon-only" }]);
+  const off = formatPage(pg);
+  assert.doesNotMatch(off, /href=\/docs/);
+  assert.match(off, /\[1\] a href=\/icon-only/);
+  assert.match(formatPage(pg, { urls: true }), /\[0\] a "Docs" href=\/docs/);
+});
+
+test("interactive drops the visible text block and keeps dialogs and elements", () => {
+  const pg = model([{ i: 0, tag: "button", text: "Retry" }], { text: "a long page of prose", dialogs: ["Payment failed"] });
+  const txt = formatPage(pg, { interactive: true });
+  assert.doesNotMatch(txt, /visible text:/);
+  assert.doesNotMatch(txt, /long page of prose/);
+  assert.match(txt, /dialogs: Payment failed/);
+  assert.match(txt, /\[0\] button "Retry"/);
+  assert.match(formatPage(pg), /visible text: a long page of prose/);
+});
+
+test("filter keeps matching elements case-insensitively and counts the rest", () => {
+  const pg = model([
+    { i: 0, tag: "button", text: "Add to cart" },
+    { i: 1, tag: "button", text: "Checkout" },
+    { i: 2, tag: "a", text: "Home", href: "/cart" },
+    { i: 3, tag: "input:text", placeholder: "Search" },
+  ]);
+  const txt = formatPage(pg, { filter: "CART" });
+  assert.match(txt, /elements \(2 of 4; 2 hidden by filter "CART"\)/);
+  assert.match(txt, /\[0\] button "Add to cart"/);
+  assert.match(txt, /\[2\] a "Home"/, "an href match counts even though the href is not printed");
+  assert.doesNotMatch(txt, /Checkout/);
+  assert.match(formatPage(pg), /elements \(4\):/, "no filter, no count");
+});
+
+test("max_chars truncates, says what was dropped and how to narrow, and is hard-capped", () => {
+  const pg = model(Array.from({ length: 500 }, (_, i) => ({ i, tag: "button", text: `Button number ${i} with a label long enough to cost real tokens` })));
+  const txt = formatPage(pg, { maxChars: 1000 });
+  assert.ok(txt.length <= 1000, `rendered ${txt.length} chars for maxChars 1000`);
+  assert.match(txt, /… truncated: \d+ of 500 element lines and \d+ chars dropped; narrow with filter, interactive or diff/);
+  assert.ok(formatPage(pg).length <= 10000, "10000 by default");
+  assert.ok(formatPage(pg, { maxChars: 999999 }).length <= 20000, "asking for more than the cap still caps");
+  assert.ok(formatPage(pg, { maxChars: Infinity, maxElements: 500 }).length > 20000, "library callers can opt out");
+});
+
+test("snapshot diff reports only what changed, and falls back to a full page with no anchor", async () => {
+  const b2 = await JevBrowser.launch({ browser });
+  await b2.page.setContent(`<button>Alpha</button>`);
+  const first = await b2.snapshotText({ diff: true });
+  assert.match(first, /no previous snapshot to diff against; showing the full page/);
+  assert.match(first, /\[\d+\] button "Alpha"/);
+  await b2.page.evaluate(() => { const x = document.createElement("button"); x.textContent = "Beta"; document.body.append(x); });
+  const d = await b2.snapshotText({ diff: true });
+  assert.match(d, /changes since the previous snapshot:/);
+  assert.match(d, /added \(1\):\n\s+button "Beta"/);
+  assert.doesNotMatch(d, /\[\d+\] button "Alpha"/, "unchanged elements are not listed again");
+  assert.match(await b2.snapshotText({ diff: true }), /no changes since the previous snapshot/);
+  await b2.close();
+});
+
+test("a typed password reaches neither a snapshot nor a diff", async () => {
+  const b2 = await JevBrowser.launch({ browser });
+  await b2.page.setContent(`<label>Password <input type="password" name="pw"></label><button>Sign in</button>`);
+  await b2.snapshotText();                                   // anchor the diff on the empty form
+  await b2.page.fill("input[type=password]", "hunter2");
+  const d = await b2.snapshotText({ diff: true });
+  assert.doesNotMatch(d, /hunter2/);
+  assert.match(d, /input:password "Password".*: \(empty\) -> value="\[redacted\]"/);
+  await b2.page.fill("input[type=password]", "correct horse");
+  const snap = await b2.snapshotText();
+  assert.doesNotMatch(snap, /correct horse/);
+  assert.match(snap, /input:password label="Password" value="\[redacted\]"/);
+  // one secret replaced by another redacts to the same string, so the diff reports nothing:
+  // not even the fact that it changed leaks, which is the safe side to err on.
+  assert.match(await b2.snapshotText({ diff: true }), /no changes since the previous snapshot/);
+  await b2.close();
+});
+
 test("resolve keeps tool, target and value consistent", () => {
   const pg = { elements: [{ i: 0, tag: "button", text: "Go" }, { i: 1, tag: "input:text", label: "Name" }, { i: 2, tag: "input:file" }] };
   const ans = (tool, target) => ({ tool: { choice: tool, probabilities: { [tool]: 0.9 } }, target: { probabilities: target }, value: { choice: "name" } });
