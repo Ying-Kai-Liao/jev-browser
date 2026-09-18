@@ -205,12 +205,42 @@ node bin/jev-browser.mjs run examples/flows/todomvc.json --headed
   snapshot or ask the user, don't just retry.
 - After steps with side effects, `browser_check` what must *not* have changed.
 
+## Cost: what the caller pays and what Jev spends
+
+`bin/jev-cost.mjs` measures both sides of the trade this project claims to make, on a page you
+name. Every snapshot, every tool result and every Jev call is measured as it happens — nothing
+is measured once and multiplied.
+
+```bash
+npm run cost                                              # the built-in saucedemo + wikipedia cases
+npm run cost -- --url https://example.com/ --goal "Log in" --value user=ada --value pw=secret
+npm run cost -- --json > run.json                         # machine-readable
+npm run cost -- --report run.json                         # re-print the table from a saved run
+node bin/jev-cost.mjs --help                              # every flag
+```
+
+Per scenario it reports **caller tokens** (the text crossing the MCP boundary: every tool result
+plus the arguments the caller had to write, at chars ÷ 4 — an approximation, and the report says
+so), **Jev tokens and calls** (the API's own `usage.input_tokens`, exact), and wall-clock
+seconds. The scenarios are run on the same page toward the same goal so they compare: a
+Playwright-MCP-style baseline that takes a fresh `page.ariaSnapshot({ mode: "ai" })` after every
+action, `browser_do`, each `browser_snapshot` option against the default, and `browser_read`
+against dumping the whole document.
+
+The `net` column is caller tokens saved minus Jev tokens spent, one for one, and it goes negative
+when a scenario loses — on a small page Jev's spend and latency can outweigh the saving, and the
+tool prints that as a loss. Measured numbers and what they say about the older estimate are in
+[RESULTS.md](RESULTS.md).
+
+A run needs network and `TYPESAFE_API_KEY`, and costs API credits. `npm test` stays offline: the
+ledger arithmetic is pure and tested in `test/cost.test.mjs`.
+
 ## Benchmark
 
 ```bash
 node bench/run.mjs --set all            # base, hard, guard (+ bench/tasks.local.mjs if present)
 node bench/run.mjs --only ti-login,drag
-node bench/context-cost.mjs bench/results/<run>.json
+node bench/context-cost.mjs bench/results/<run>.json   # older one-sided estimate; see npm run cost
 ```
 
 Private sites and credentials go in `bench/tasks.local.mjs` (git-ignored), exporting `LOCAL`.
@@ -225,6 +255,7 @@ src/prune.mjs        pure helpers: split page text into blocks, batch, rank, rea
 src/jev.mjs          System One API client
 src/flow.mjs         JSON flow runner
 bin/                 CLI and MCP server
+bin/jev-cost.mjs     two-sided token ledger: caller tokens vs Jev tokens, measured per scenario
 bench/               tasks with ground-truth checks, runner, context-cost estimate
 test/                offline fixture tests, MCP end-to-end test
 NOTES.md             design notes: what works with Jev, what doesn't, and why

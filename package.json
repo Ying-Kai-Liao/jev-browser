@@ -47,6 +47,7 @@
     "test:e2e": "node test/mcp.e2e.mjs",
     "bench": "node bench/run.mjs",
     "bench:cost": "node bench/context-cost.mjs",
+    "cost": "node bin/jev-cost.mjs",
     "mcp": "node bin/jev-browser-mcp.mjs",
     "setup": "npx playwright install chromium"
   },

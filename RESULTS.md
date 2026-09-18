@@ -80,3 +80,111 @@ The gap comes from big pages: Wikipedia link (≈149k-token snapshot, ~2,300×),
 HN and books (~115–180×). Small test pages save 2–8×. The iframe and shadow-DOM pages
 cost *more* (0.3–0.4×), because their snapshots are tiny. This does not measure how many
 actions an LLM would take on its own.
+
+## Measured two-sided ledger (2026-09-19)
+
+The section above is an estimate: `bench/context-cost.mjs` measures one aria snapshot on each
+task's start page and reuses its size for every action, and it reports Jev's own spend as a
+trailing column that is never subtracted from the saving. `bin/jev-cost.mjs` measures every
+snapshot, every tool result and every Jev call as it happens, and puts both sides in one table:
+
+```
+npm run cost                                    # the two cases below
+npm run cost -- --url <url> --goal "<goal>"     # any page
+npm run cost -- --json > run.json && npm run cost -- --report run.json
+```
+
+Model `jev-latest`, headless Chromium 1280×800, one run, 2026-09-19. **Caller tokens** are the
+text crossing the MCP boundary — every tool result plus the arguments the caller had to write —
+at chars ÷ 4, an approximation. **Jev tokens** are the API's own `usage.input_tokens`, exact.
+`net` = caller tokens saved against the row's baseline − Jev tokens spent, counted one for one;
+it is the pessimistic reading, since a Jev token is much cheaper than a caller token.
+
+```
+══ saucedemo ══ https://www.saucedemo.com/
+   goal: "Log in"   question: "Which usernames can be used to log in, and what is the password?"
+
+group   scenario                                 caller tok  jev tok calls      s   vs base        net
+------------------------------------------------------------------------------------------------------
+act     playwright-mcp (baseline)                     1,928        —     —   0.05     1.00×          0
+open    browser_open                                     86        0     0   1.75         —          —
+observe browser_snapshot (baseline)                     110        0     0   0.00     1.00×          0
+observe browser_snapshot --interactive                   70        0     0   0.00     1.57×         40
+observe browser_snapshot --filter                        95        0     0   0.00     1.16×         15
+observe browser_snapshot --urls                         112        0     0   0.00     0.98×         -2
+observe browser_snapshot --max-chars 2000               114        0     0   0.00     0.96×         -4
+read    browser_read (whole doc) (baseline)             157        0     0   0.00     1.00×          0
+read    browser_read (ranked)                           152        0     0   0.00     1.03×          5
+act     browser_do                                      110    7,383     4   2.89     17.5×     -5,565
+observe browser_snapshot (after action) (baseli…        607        0     0   0.21     1.00×          0
+observe browser_act scroll                               45        0     0   0.00         —          —
+observe browser_snapshot --diff                          62        0     0   0.01     9.79×        545
+------------------------------------------------------------------------------------------------------
+TOTAL                                                 3,648    7,383     4   4.93     17.5×     -5,565
+
+  LOSS on this page: browser_do (-5,565 tokens), browser_snapshot --max-chars 2000 (-4),
+                     browser_snapshot --urls (-2)
+
+══ wikipedia ══ https://en.wikipedia.org/wiki/Alan_Turing
+   goal: "Open the linked article about Bletchley Park"
+   question: "What did Alan Turing do at Bletchley Park during the Second World War?"
+
+group   scenario                                 caller tok  jev tok calls      s   vs base        net
+------------------------------------------------------------------------------------------------------
+act     playwright-mcp (baseline)                   267,662        —     —   0.41     1.00×          0
+open    browser_open                                    158        0     0   2.45         —          —
+observe browser_snapshot (baseline)                   2,491        0     0   1.21     1.00×          0
+observe browser_snapshot --interactive                2,497        0     0   0.12     1.00×         -6
+observe browser_snapshot --filter                       805        0     0   0.12     3.09×      1,686
+observe browser_snapshot --urls                       2,484        0     0   0.11     1.00×          7
+observe browser_snapshot --max-chars 2000               699        0     0   0.11     3.56×      1,792
+read    browser_read (whole doc) (baseline)          28,042        0     0   0.05     1.00×          0
+read    browser_read (ranked)                         3,270   41,334     4   2.77     8.58×    -16,562
+act     browser_do                                       81   44,259     4   8.57     3,304×    223,322
+observe browser_snapshot (after action) (baseli…      2,489        0     0   0.10     1.00×          0
+observe browser_act scroll                               50        0     0   0.00         —          —
+observe browser_snapshot --diff                          67        0     0   0.07     37.1×      2,422
+------------------------------------------------------------------------------------------------------
+TOTAL                                               310,795   85,593     8  16.11     3,304×    223,322
+
+  LOSS on this page: browser_read (ranked) (-16,562 tokens), browser_snapshot --interactive (-6)
+```
+
+The `playwright-mcp` row is one real `page.ariaSnapshot({ mode: "ai" })` per navigation and per
+action, taken on the page as it then was. Its Jev columns are `—`: a Playwright-MCP run has no
+cheap model, and the Jev calls used here only walked the page into each state (saucedemo 6 calls
+/ 9,847 tokens, wikipedia 4 / 44,569) — they are excluded. Its seconds are the measured
+snapshot time only; a real run also pays the caller model's own latency, which this cannot
+measure, so the number is a floor and not a comparison.
+
+### How this compares to the estimate above
+
+**The caller-side ratio holds up; the conclusion drawn from it does not.** The estimate put the
+Wikipedia-link task at ~2,300×; measured, it is 3,304×. That is the same order of magnitude, so
+the headline was not inflated by the reuse assumption. What the estimate never did was subtract
+Jev's own spend, and once it is subtracted the small-page case is a **loss**: logging in to
+saucedemo costs the caller 110 tokens instead of 1,928 — a 17.5× win on the expensive model —
+while spending 7,383 tokens on the cheap one, for a net of **−5,565**. On the same page the trade
+also costs 2.89 s of `browser_do` against 0.05 s of aria snapshotting.
+
+**Reusing one snapshot size is wrong in both directions, and badly wrong when the page changes.**
+The four aria snapshots of the saucedemo walk measured 140, 146, 150 and **1,400** tokens: the
+page after login is ten times the login form. The estimate's method (4 × the start page) gives
+560 tokens against the measured 1,928 — **3.4× low**. On Wikipedia the same method gives 2 ×
+149,370 = 298,740 against the measured 267,662 — **12% high**, because the second page is smaller
+than the first.
+
+**`browser_read` is a loss on a long article at today's settings.** Answering from the Alan
+Turing page costs the caller 3,270 tokens ranked against 28,042 for the whole document — 8.6×
+less — but the ranking spends 41,334 Jev tokens across 4 requests, for a net of **−16,562**. It
+is still the right tool when the caller's context is the binding constraint; it is not a saving
+in total tokens.
+
+**The new `browser_snapshot` options are free, and only pay on large pages.** On Wikipedia
+`--max-chars 2000` is 3.6× cheaper, `--filter` 3.1×, and `--diff` after one scroll 37×; on
+saucedemo they move 70–114 tokens and `--urls` and `--max-chars` are a couple of tokens *worse*
+than the default. `--interactive` is 1.57× on saucedemo but 1.00× on Wikipedia, where the
+element list, not the prose, is what fills the budget. None of them calls Jev.
+
+Two pages is not a benchmark. These numbers say what these two pages cost, not what a median
+task costs; run `npm run cost -- --url …` on the page you care about.

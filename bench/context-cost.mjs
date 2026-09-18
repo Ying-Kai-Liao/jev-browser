@@ -4,6 +4,8 @@
 //   jev-browser MCP: one compact browser_do result per step (Jev reads the page instead).
 // Uses a finished bench run for action/step counts:  node bench/context-cost.mjs bench/results/r6.json
 // Estimate only: snapshot size is measured on each task's start page and reused for every action.
+// Superseded by bin/jev-cost.mjs, which measures every snapshot and both sides of the ledger
+// (see RESULTS.md); kept because its numbers are published. Delete it if you no longer want them.
 import { chromium } from "playwright";
 import { readFileSync } from "node:fs";
 import { TASKS as BASE, HARD, GUARD } from "./tasks.mjs";
