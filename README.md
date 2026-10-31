@@ -225,7 +225,13 @@ instead of Playwright's Chromium (`chrome`, `chrome-beta`, `msedge`, or the path
 Chromium-based browser's executable, such as Brave), `JEV_BROWSER_PROFILE=/dir` keeps a persistent
 profile (logins survive restarts; use a dedicated directory, since Chrome won't be automated with
 your everyday profile), `JEV_BROWSER_LOG=1` prints per-round decisions to stderr,
-and `JEV_BROWSER_NO_INSTALL=1` turns off the Chromium download on first use. The MCP server
+and `JEV_BROWSER_NO_INSTALL=1` turns off the Chromium download on first use.
+`JEV_BROWSER_IDLE_MINUTES` (default `10`, `0` = never) closes the browser after that long without a
+tool call; the next call opens it again, on a new page. The server also closes it when its client
+disconnects. Chrome opens a profile in one browser at a time, so this lets a script or another
+client use the same `JEV_BROWSER_PROFILE` in between; a launch on a profile that is still open
+fails with `Browser profile in use by another browser: <dir>` (`error.code` is `PROFILE_IN_USE`
+in the library). The MCP server
 reads `TYPESAFE_API_KEY` or `OPENROUTER_API_KEY` from its environment, or from the `.env` of a source checkout, but
 never from the `.env` of the directory it was started in.
 

@@ -5,7 +5,8 @@
 //
 // Env: TYPESAFE_API_KEY or OPENROUTER_API_KEY, JEV_BROWSER_HEADED=1, JEV_BROWSER=chrome|msedge|/path (your browser),
 //      JEV_BROWSER_PROFILE=/dir (persistent profile, keeps logins), JEV_BROWSER_LOG=1 (rounds to stderr),
-//      JEV_BROWSER_NO_INSTALL=1 (don't download Chromium on first use)
+//      JEV_BROWSER_NO_INSTALL=1 (don't download Chromium on first use),
+//      JEV_BROWSER_IDLE_MINUTES=10 (close the browser after this long without a tool call; 0 = never)
 import { createRequire } from "node:module";
 import { execFile } from "node:child_process";
 import { dirname, join } from "node:path";
@@ -31,9 +32,9 @@ const HEADED = /^(1|true)$/i.test(process.env.JEV_BROWSER_HEADED ?? "");   // pl
 const launch = () => JevBrowser.launch({ headed: HEADED, highlight: HEADED, userDataDir: process.env.JEV_BROWSER_PROFILE || undefined });
 
 // Holds the launch promise, not the session, so parallel tool calls share one browser.
-let session;
+let session, closing = Promise.resolve();
 function browser() {
-  session ??= launch()
+  session ??= closing.then(launch)   // a browser still closing holds the profile
     .catch(async e => {
       if (!/not installed/.test(e.message) || process.env.JEV_BROWSER_NO_INSTALL === "1") throw e;
       await installChromium();
@@ -45,11 +46,21 @@ function browser() {
 async function closeSession() {
   if (!session) return;
   const s = session; session = undefined;
-  await (await s.catch(() => null))?.close();
+  closing = s.then(b => b.close()).catch(() => {});
+  await closing;
 }
+// Chrome opens a profile in one browser at a time, so let go of it when no tool has run for a
+// while: a script or another client can then use the same profile. 0 keeps the browser open.
+const idleMinutes = Number(process.env.JEV_BROWSER_IDLE_MINUTES || 10);
+const IDLE_MS = (Number.isFinite(idleMinutes) && idleMinutes >= 0 ? idleMinutes : 10) * 60_000;
+let active = 0, idleTimer;
 const text = obj => ({ content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj, null, 1) }] });
 const fail = e => ({ isError: true, content: [{ type: "text", text: String(e?.message ?? e).split("\n")[0] }] });
-const wrap = fn => async args => { try { return await fn(args); } catch (e) { return fail(e); } };
+const wrap = fn => async args => {
+  active++; clearTimeout(idleTimer);
+  try { return await fn(args); } catch (e) { return fail(e); }
+  finally { if (--active === 0 && session && IDLE_MS > 0) idleTimer = setTimeout(closeSession, IDLE_MS); }
+};
 const stderrLog = process.env.JEV_BROWSER_LOG === "1" ? s => process.stderr.write(s + "\n") : () => {};
 
 const server = new McpServer({ name: "jev-browser", version });
@@ -223,4 +234,5 @@ server.registerTool("browser_webmcp_call", {
 
 const shutdown = async () => { await closeSession(); process.exit(0); };
 process.on("SIGINT", shutdown); process.on("SIGTERM", shutdown);
+process.stdin.once("end", shutdown);   // the client went away; an open browser would keep this process alive
 await server.connect(new StdioServerTransport());
