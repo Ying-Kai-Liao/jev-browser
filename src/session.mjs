@@ -136,6 +136,8 @@ export class JevBrowser {
     }
     } catch (e) {
       const msg = String(e.message);
+      // Chrome opens a profile in one browser at a time; the second one exits before any page loads.
+      if (userDataDir && /ProcessSingleton|SingletonLock/i.test(msg)) throw Object.assign(new Error(`Browser profile in use by another browser: ${userDataDir}. Close the browser that has it open (the jev-browser MCP server closes its own after JEV_BROWSER_IDLE_MINUTES without a tool call) or use another profile.`), { code: "PROFILE_IN_USE", profile: userDataDir });
       if (Object.keys(custom).length && /is not found|ENOENT|Executable doesn't exist/i.test(msg)) throw new Error(`Browser "${use}" (JEV_BROWSER) was not found. Install it, or set JEV_BROWSER to a Chromium-based browser's executable path, or unset it to use Playwright's Chromium.`);
       if (/Executable doesn't exist|browserType\.launch/i.test(msg) && /install/i.test(msg)) throw new Error("Chromium for Playwright is not installed. Run: npx playwright install chromium");
       throw e;
